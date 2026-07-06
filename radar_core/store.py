@@ -66,6 +66,27 @@ class BaseStore:
         row = await cur.fetchone()
         return None if row is None else str(row["value"])
 
+    # -- config overrides (botcontrol) -------------------------------------------
+
+    async def get_overrides(self) -> dict[str, str]:
+        cur = await self._conn.execute("SELECT key, value FROM config_overrides")
+        return {str(r["key"]): str(r["value"]) for r in await cur.fetchall()}
+
+    async def set_override(self, key: str, value: str) -> None:
+        await self._conn.execute(
+            """
+            INSERT INTO config_overrides (key, value, updated_at) VALUES (?, ?, ?)
+            ON CONFLICT (key) DO UPDATE SET
+                value = excluded.value, updated_at = excluded.updated_at
+            """,
+            (key, value, utcnow_str()),
+        )
+        await self._conn.commit()
+
+    async def delete_override(self, key: str) -> None:
+        await self._conn.execute("DELETE FROM config_overrides WHERE key = ?", (key,))
+        await self._conn.commit()
+
     # -- generic pruning -------------------------------------------------------
 
     async def prune_older_than(self, table: str, ts_column: str, max_age_days: int) -> int:

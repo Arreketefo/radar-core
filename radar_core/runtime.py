@@ -13,7 +13,7 @@ import logging
 import signal
 import sqlite3
 import sys
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Coroutine
 from datetime import UTC, datetime
 
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
@@ -40,6 +40,7 @@ async def run_daemon(
     tick: Callable[[], Awaitable[object]],
     interval_s: int,
     cleanup: Callable[[], Awaitable[None]] | None = None,
+    background: tuple[Callable[[], Coroutine[None, None, None]], ...] = (),
 ) -> None:
     """Run `tick` every interval_s (first run immediately) until SIGINT/SIGTERM.
 
@@ -67,10 +68,15 @@ async def run_daemon(
         coalesce=True,
     )
     scheduler.start()
+    tasks: list[asyncio.Task[None]] = [
+        asyncio.create_task(factory()) for factory in background
+    ]
     log.info("%s daemon started (tick every %ds)", name, interval_s)
     try:
         await stop.wait()
     finally:
+        for task in tasks:
+            task.cancel()
         scheduler.shutdown(wait=False)
         async with tick_lock:  # let an in-flight tick finish
             pass
