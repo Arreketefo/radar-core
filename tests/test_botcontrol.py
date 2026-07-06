@@ -91,6 +91,94 @@ async def test_domain_command_and_unknown(store: BaseStore):
     assert "desconocido" in await bot._handle("/nada")
 
 
+async def test_version_reports_build_info(store: BaseStore, monkeypatch):
+    bot = BotCommander("tok", {"42"}, store, "testapp", SPECS, version="abc123 2026-07-06")
+    assert await bot._handle("/version") == "testapp: abc123 2026-07-06"
+    # sin version explícita cae al env BUILD_INFO o "dev"
+    monkeypatch.delenv("BUILD_INFO", raising=False)
+    assert "dev" in await commander(store)._handle("/version")
+
+
+def digest_bot(store: BaseStore, sent: list[dict], **kwargs) -> BotCommander:
+    async def summary() -> str:
+        return "24h: 3 observaciones, 1 alerta"
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        sent.append(json.loads(request.content))
+        return httpx.Response(200, json={"ok": True})
+
+    kwargs.setdefault("digest_hour", 0)
+    bot = BotCommander("tok", {"42"}, store, "testapp", SPECS,
+                       digest_provider=summary, **kwargs)
+    bot._client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    return bot
+
+
+async def test_digest_toggle_and_daily_send(store: BaseStore):
+    sent: list[dict] = []
+    bot = digest_bot(store, sent)
+
+    # apagado por defecto: no envía
+    await bot._digest_once()
+    assert sent == []
+
+    await store.set_meta("digest_enabled", "1")
+    await bot._digest_once()
+    assert len(sent) == 1 and "24h: 3 observaciones" in sent[0]["text"]
+    # mismo día: no repite
+    await bot._digest_once()
+    assert len(sent) == 1
+
+    assert "desactivado" in await bot._handle("/digest off")
+    # una app sin provider lo dice claro
+    assert "no ofrece" in await commander(store)._handle("/digest on")
+
+
+async def test_digest_on_after_hour_defers_to_tomorrow(store: BaseStore):
+    sent: list[dict] = []
+    bot = digest_bot(store, sent)  # digest_hour=0: la hora de hoy YA pasó siempre
+    assert "activado" in await bot._handle("/digest on")
+    await bot._digest_once()
+    assert sent == []  # marcado como enviado hoy → primer digest mañana
+
+
+async def test_digest_default_on_and_hour_clamped(store: BaseStore):
+    sent: list[dict] = []
+    # digest_default=True: activo sin /digest on (spec de sospechosos de ojeador)
+    bot = digest_bot(store, sent, digest_default=True)
+    await bot._digest_once()
+    assert len(sent) == 1
+    # /digest off lo apaga aunque el default sea on
+    await bot._handle("/digest off")
+    assert not await bot._digest_enabled()
+    # hora fuera de rango se recorta a 23 en vez de matar el digest en silencio
+    assert digest_bot(store, [], digest_hour=24)._digest_hour == 23
+
+
+async def test_digest_partial_send_failure_no_duplicates(store: BaseStore):
+    async def summary() -> str:
+        return "resumen"
+
+    calls: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        chat = str(json.loads(request.content)["chat_id"])
+        calls.append(chat)
+        if chat == "13":
+            return httpx.Response(429, json={"ok": False})
+        return httpx.Response(200, json={"ok": True})
+
+    bot = BotCommander("tok", {"42", "13"}, store, "testapp", SPECS,
+                       digest_provider=summary, digest_hour=0)
+    bot._client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    await store.set_meta("digest_enabled", "1")
+
+    await bot._digest_once()  # el fallo del chat 13 no debe romper ni repetir
+    assert sorted(calls) == ["13", "42"]
+    await bot._digest_once()  # mismo día: nadie recibe duplicado
+    assert sorted(calls) == ["13", "42"]
+
+
 async def test_poll_auth_and_offset(store: BaseStore):
     sent: list[dict] = []
 

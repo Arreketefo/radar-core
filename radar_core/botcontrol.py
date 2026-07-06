@@ -13,18 +13,26 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from collections.abc import Awaitable, Callable
+import os
+from collections.abc import Awaitable, Callable, Coroutine
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from typing import Any
 
 import httpx
 
-from radar_core.store import BaseStore
+from radar_core.store import BaseStore, utcnow_str
 
 log = logging.getLogger(__name__)
 
 OFFSET_KEY = "telegram_offset"
 PAUSED_KEY = "paused"
+DIGEST_KEY = "digest_enabled"
+DIGEST_SENT_KEY = "digest_last_sent"
+
+# El digest se reevalúa con esta cadencia: llega como muy tarde 15 min después
+# de la hora configurada, sin cron adicional en la VM.
+_DIGEST_POLL_S = 900
 
 DomainHandler = Callable[[str], Awaitable[str]]
 
@@ -69,6 +77,15 @@ def text(raw: str) -> object:
     return raw.strip()
 
 
+def id_and_value(args: str, name: str) -> tuple[int, float]:
+    """Parseo '<id> <valor>' de comandos de dominio (/tope 3 350)."""
+    try:
+        raw_id, raw_value = args.split()
+        return int(raw_id), float(raw_value)
+    except ValueError as exc:
+        raise ValueError(f"uso: /{name} <id> <valor>") from exc
+
+
 def apply_overrides(settings: Any, raw: dict[str, str], specs: dict[str, Override]) -> Any:
     """Settings efectivo = base (.env) ⊕ overrides válidos. Los inválidos
     (p. ej. tras un cambio de código) se ignoran con aviso, nunca rompen."""
@@ -88,6 +105,16 @@ async def is_paused(store: BaseStore) -> bool:
     return await store.get_meta(PAUSED_KEY) == "1"
 
 
+async def skip_tick_if_paused(store: BaseStore, last_tick_key: str) -> bool:
+    """Guard de tick para /pausa: pausado != muerto, así que refresca la
+    marca de frescura que lee el healthcheck. True = omitir el tick."""
+    if not await is_paused(store):
+        return False
+    await store.set_meta(last_tick_key, utcnow_str())
+    log.info("en pausa (/reanuda en Telegram): tick omitido")
+    return True
+
+
 class BotCommander:
     def __init__(
         self,
@@ -98,6 +125,10 @@ class BotCommander:
         overrides: dict[str, Override],
         domain_commands: dict[str, DomainHandler] | None = None,
         status_provider: Callable[[], Awaitable[str]] | None = None,
+        digest_provider: Callable[[], Awaitable[str]] | None = None,
+        digest_hour: int = 9,
+        digest_default: bool = False,
+        version: str | None = None,
     ) -> None:
         self._base = f"https://api.telegram.org/bot{bot_token}"
         self._allowed = allowed_chat_ids
@@ -106,7 +137,18 @@ class BotCommander:
         self._overrides = overrides
         self._domain = domain_commands or {}
         self._status_provider = status_provider
+        self._digest_provider = digest_provider
+        # Un valor fuera de 0-23 haría `now.hour < hora` siempre cierto y el
+        # digest moriría en silencio: se recorta, no se confía en el .env.
+        self._digest_hour = min(max(digest_hour, 0), 23)
+        self._digest_default = digest_default
+        self._version = version or os.environ.get("BUILD_INFO", "dev")
         self._client = httpx.AsyncClient(timeout=70.0)
+
+    def background_tasks(self) -> tuple[Callable[[], Coroutine[None, None, None]], ...]:
+        """Tasks de fondo que el daemon debe lanzar junto al scheduler. La
+        lista vive aquí: las apps no tienen que conocer los bucles internos."""
+        return (self.run, self.run_digest)
 
     async def run(self) -> None:
         """Bucle de long-polling; pensado como task de fondo del daemon."""
@@ -119,6 +161,49 @@ class BotCommander:
             except Exception as exc:
                 log.warning("bot: error de polling (%s); reintento en 15s", exc)
                 await asyncio.sleep(15)
+
+    async def run_digest(self) -> None:
+        """Bucle del digest diario; task de fondo hermano de run(). Sin
+        provider registrado no hace nada (la app no ofrece digest)."""
+        if self._digest_provider is None:
+            return
+        while True:
+            try:
+                await self._digest_once()
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                log.warning("bot: error del digest (%s); reintento en %ds",
+                            exc, _DIGEST_POLL_S)
+            await asyncio.sleep(_DIGEST_POLL_S)
+
+    async def _digest_enabled(self) -> bool:
+        value = await self._store.get_meta(DIGEST_KEY)
+        if value is None:
+            return self._digest_default
+        return value == "1"
+
+    async def _digest_once(self) -> None:
+        if self._digest_provider is None:
+            return
+        if not await self._digest_enabled():
+            return
+        now = datetime.now(UTC)
+        if now.hour < self._digest_hour:
+            return
+        today = now.strftime("%Y-%m-%d")
+        if await self._store.get_meta(DIGEST_SENT_KEY) == today:
+            return
+        summary = await self._digest_provider()
+        # At-most-once: el día queda marcado ANTES de enviar y cada chat va en
+        # su propio try — un 429/timeout parcial no puede provocar una tormenta
+        # de duplicados en los chats ya servidos (reintento cada 15 min).
+        await self._store.set_meta(DIGEST_SENT_KEY, today)
+        for chat_id in self._allowed:
+            try:
+                await self._send(chat_id, f"{self._app} — digest {today}\n{summary}")
+            except Exception as exc:
+                log.warning("digest: envío a chat %s falló (%s)", chat_id, exc)
 
     async def _poll_once(self) -> None:
         offset = int(await self._store.get_meta(OFFSET_KEY) or 0)
@@ -181,6 +266,10 @@ class BotCommander:
         if command == "reanuda" and not args:
             await self._store.set_meta(PAUSED_KEY, "0")
             return f"{self._app} reanudado"
+        if command == "version":
+            return f"{self._app}: {self._version}"
+        if command == "digest":
+            return await self._digest_command(args)
         handler = self._domain.get(command)
         if handler is not None:
             try:
@@ -210,9 +299,33 @@ class BotCommander:
         await self._store.set_override(key, str(value))
         return f"{key}: {previous} → {parsed} ✓ (aplica en el proximo tick)"
 
+    async def _digest_command(self, args: str) -> str:
+        if self._digest_provider is None:
+            return f"{self._app} no ofrece digest diario"
+        choice = args.strip().lower()
+        if choice == "on":
+            await self._store.set_meta(DIGEST_KEY, "1")
+            now = datetime.now(UTC)
+            if now.hour >= self._digest_hour:
+                # La hora de hoy ya pasó: sin esta marca el primer digest
+                # saldría "ya mismo" en vez de mañana a la hora prometida.
+                await self._store.set_meta(
+                    DIGEST_SENT_KEY, now.strftime("%Y-%m-%d")
+                )
+            return (f"digest diario activado (~{self._digest_hour:02d}:00 UTC, "
+                    "primer envío mañana si la hora de hoy ya pasó); "
+                    "/digest off para quitarlo")
+        if choice == "off":
+            await self._store.set_meta(DIGEST_KEY, "0")
+            return "digest diario desactivado"
+        state = "on" if await self._digest_enabled() else "off"
+        return (f"digest diario: {state} (~{self._digest_hour:02d}:00 UTC) — "
+                "uso: /digest on|off")
+
     def _help(self) -> str:
         common = (
-            "/status /config /set <k> <v> /reset <k> /pausa /reanuda /ayuda"
+            "/status /config /set <k> <v> /reset <k> /pausa /reanuda "
+            "/digest /version /ayuda"
         )
         domain = " ".join(f"/{name}" for name in sorted(self._domain)) or "(ninguno)"
         return f"{self._app} — comandos:\ncomunes: {common}\ndominio: {domain}"
