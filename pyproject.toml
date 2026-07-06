@@ -22,6 +22,12 @@ dev = [
 requires = ["hatchling"]
 build-backend = "hatchling.build"
 
+# Consumers install this package as a path dependency: without explicit
+# cache-keys, uv only rebuilds when pyproject.toml's mtime changes and serves
+# a stale wheel after source-only edits (verified with uv 0.11).
+[tool.uv]
+cache-keys = [{ file = "pyproject.toml" }, { file = "radar_core/**/*.py" }]
+
 [tool.hatch.build.targets.wheel]
 packages = ["radar_core"]
 

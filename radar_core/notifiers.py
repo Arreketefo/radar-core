@@ -50,7 +50,7 @@ class SmtpSender:
     """SMTP delivery. smtp_url: smtp://user:pass@host:587 (STARTTLS when
     offered) or smtps://user:pass@host:465 (implicit TLS)."""
 
-    def __init__(self, smtp_url: str, to_addr: str) -> None:
+    def __init__(self, smtp_url: str, to_addr: str, app_name: str = "radar") -> None:
         parts = urlsplit(smtp_url)
         if parts.scheme not in ("smtp", "smtps") or not parts.hostname:
             raise ValueError(f"invalid smtp_url: {smtp_url!r}")
@@ -59,7 +59,9 @@ class SmtpSender:
         self._ssl = parts.scheme == "smtps"
         self._user = unquote(parts.username) if parts.username else None
         self._password = unquote(parts.password) if parts.password else None
-        self.from_addr = self._user or f"radar@{self._host}"
+        # app_name keeps each radar's historical sender (vigia@host, ...):
+        # relays with sender allowlists care about this.
+        self.from_addr = self._user or f"{app_name}@{self._host}"
         self._to = to_addr
 
     async def send(self, subject: str, body: str) -> None:
