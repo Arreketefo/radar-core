@@ -60,7 +60,9 @@ async def get_json(
     headers: dict[str, str] | None = None,
 ) -> Any:
     """GET with rate limiting; retries 429/5xx/transport errors with backoff."""
-    return await request_json(client, "GET", url, bucket, breaker, params=params, headers=headers)
+    return await request_json(
+        client, "GET", url, bucket, breaker, params=params, headers=headers
+    )
 
 
 async def post_json(
@@ -72,7 +74,9 @@ async def post_json(
     headers: dict[str, str] | None = None,
 ) -> Any:
     """POST (JSON body) with the same rate limiting / backoff / breaker."""
-    return await request_json(client, "POST", url, bucket, breaker, json_body=body, headers=headers)
+    return await request_json(
+        client, "POST", url, bucket, breaker, json_body=body, headers=headers
+    )
 
 
 async def request_json(
@@ -88,7 +92,9 @@ async def request_json(
     if breaker is not None:
         breaker.ensure_closed()
     try:
-        result = await _request_with_backoff(client, method, url, params, json_body, headers, bucket)
+        result = await _request_with_backoff(
+            client, method, url, params, json_body, headers, bucket
+        )
     except (httpx.TransportError, httpx.HTTPStatusError):
         if breaker is not None:
             breaker.record_failure()
@@ -111,7 +117,9 @@ async def _request_with_backoff(
     for attempt in range(1, _MAX_ATTEMPTS + 1):
         await bucket.acquire()
         try:
-            resp = await client.request(method, url, params=params, json=json_body, headers=headers)
+            resp = await client.request(
+                method, url, params=params, json=json_body, headers=headers
+            )
         except httpx.TransportError as exc:
             if attempt == _MAX_ATTEMPTS:
                 raise
