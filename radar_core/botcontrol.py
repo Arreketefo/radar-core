@@ -129,6 +129,7 @@ class BotCommander:
         digest_hour: int = 9,
         digest_default: bool = False,
         version: str | None = None,
+        help_text: str | None = None,
     ) -> None:
         self._base = f"https://api.telegram.org/bot{bot_token}"
         self._allowed = allowed_chat_ids
@@ -143,6 +144,10 @@ class BotCommander:
         self._digest_hour = min(max(digest_hour, 0), 23)
         self._digest_default = digest_default
         self._version = version or os.environ.get("BUILD_INFO", "dev")
+        # Ayuda curada opcional: si la app la aporta, /ayuda la usa tal cual en
+        # vez del listado genérico. Backward-compatible (None = comportamiento
+        # anterior), así que las apps que no la pasan no cambian.
+        self._help_text = help_text
         self._client = httpx.AsyncClient(timeout=70.0)
 
     def background_tasks(self) -> tuple[Callable[[], Coroutine[None, None, None]], ...]:
@@ -323,6 +328,8 @@ class BotCommander:
                 "uso: /digest on|off")
 
     def _help(self) -> str:
+        if self._help_text:
+            return self._help_text
         common = (
             "/status /config /set <k> <v> /reset <k> /pausa /reanuda "
             "/digest /version /ayuda"

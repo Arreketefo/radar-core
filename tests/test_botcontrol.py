@@ -203,3 +203,18 @@ async def test_poll_auth_and_offset(store: BaseStore):
     assert len(sent) == 1 and sent[0]["chat_id"] == "42"
     # offset persistido: no se reprocesa tras reinicio
     assert await store.get_meta("telegram_offset") == "8"
+
+
+async def test_ayuda_defaults_to_generic_listing(store: BaseStore):
+    bot = commander(store, handler=lambda a: None)
+    reply = await bot._handle("/ayuda")
+    assert "testapp — comandos:" in reply
+    assert "/eco" in reply  # comando de dominio listado
+
+
+async def test_ayuda_uses_custom_help_text_when_provided(store: BaseStore):
+    bot = BotCommander(
+        "tok", {"42"}, store, "testapp", SPECS,
+        help_text="AYUDA CURADA\n/lista — ver alertas",
+    )
+    assert await bot._handle("/ayuda") == "AYUDA CURADA\n/lista — ver alertas"
