@@ -35,6 +35,10 @@ async def open_db(db_path: str) -> AsyncIterator[aiosqlite.Connection]:
     conn = await aiosqlite.connect(db_path)
     try:
         await conn.execute("PRAGMA journal_mode=WAL")
+        # With WAL, NORMAL is the standard pairing: fsync on checkpoint instead of
+        # on every commit (daemons here commit dozens of times per tick). Power
+        # loss can drop the last commit but never corrupts the database.
+        await conn.execute("PRAGMA synchronous=NORMAL")
         await conn.execute("PRAGMA foreign_keys=ON")
         conn.row_factory = aiosqlite.Row
         yield conn
