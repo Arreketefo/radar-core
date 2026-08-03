@@ -1,9 +1,9 @@
 # radar-core — Núcleo común de la familia de radares
 
 > Documento de arquitectura e implementación. Prosa en español, código e identificadores en inglés.
-> Paquete Python: `radar_core`. Repo propio: `~/Projects/radar-core` — **PRIVADO** (decisión 2026-07-06).
-> Versión del doc: v1.1 (2026-07-06).
-> Consumidores: **Vigía** (construida — migración COMPLETA, ver §5.1), **Ojeador** (definida), **Tasador** (definida).
+> Paquete Python: `radar_core`. Repo propio y versionado con SemVer.
+> Versión del doc: v1.2 (2026-08-03).
+> Consumidores: **Vigía**, **Ojeador**, **Tasador** y **Audímetro**.
 
 ---
 
@@ -84,11 +84,12 @@ Regla operativa: si una PR al core menciona "vuelo", "hotel", "listing", "piso" 
 
 ## 4. Distribución y versionado
 
-- **Repo PRIVADO** (`github.com/Arreketefo/radar-core`). Consecuencia directa:
-  una dependencia `git+https` no funciona dentro de `docker build` (el contexto
-  de build no tiene credenciales). Mecanismo elegido: **vendoring**.
-- **Vendoring**: cada app declara la dependencia por path local dentro de su
-  propio árbol —
+- **Fuente versionada** (`github.com/Arreketefo/radar-core`): los tags SemVer son
+  la referencia estable para consumidores y revisiones. Un consumidor público
+  puede depender de un tag Git; el desarrollo conjunto puede usar un path local.
+- **Vendoring para despliegues sin credenciales**: las instalaciones de producción
+  pueden copiar un snapshot revisado dentro del contexto Docker. Cada app declara
+  entonces la dependencia por path local dentro de su propio árbol —
   ```toml
   dependencies = ["radar-core"]
   [tool.uv.sources]
@@ -97,13 +98,12 @@ Regla operativa: si una PR al core menciona "vuelo", "hotel", "listing", "piso" 
   — y un target `make vendor-core` refresca la copia
   (`rsync -a --delete --exclude .git ../radar-core/ vendor/radar-core/`),
   como prerrequisito de `install`, `build` y `deploy`. Reglas:
-  - `vendor/` va en el `.gitignore` de cada app (CRÍTICO en vigia, que es
-    pública: el core privado jamás debe entrar en su repo) y NO se excluye en
-    `.dockerignore` (el build lo necesita).
+  - `vendor/` va en el `.gitignore` de cada app para evitar duplicar historial y
+    NO se excluye en `.dockerignore` (el build lo necesita).
   - El Dockerfile copia `vendor/` junto a `pyproject.toml`/`uv.lock` ANTES del
     primer `uv sync` (la dependencia por path debe existir en la capa de deps).
-  - Nota asumida: el repo público de vigia deja de ser auto-contenible para
-    terceros (README lo indica); trade-off aceptado.
+  - Los repositorios públicos deben ofrecer además una ruta de instalación
+    reproducible; no pueden depender únicamente de un directorio ignorado.
 - **Versionado**: tags SemVer en el repo del core como puntos de referencia;
   la versión efectiva de cada app es el snapshot vendorizado (registrado por
   el commit del core anotado en el mensaje de deploy). CHANGELOG.md obligatorio.
