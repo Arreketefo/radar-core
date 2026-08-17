@@ -39,7 +39,7 @@ Changelog = "https://github.com/Arreketefo/radar-core/blob/main/CHANGELOG.md"
 dev = [
     "pytest>=8.3",
     "pytest-asyncio>=0.24",
-    "ruff>=0.6",
+    "ruff>=0.16.3",
     "mypy>=1.11",
 ]
 
